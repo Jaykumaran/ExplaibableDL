@@ -7,3 +7,8 @@ It splits the input batch, processes it on each GPU, and then averages the gradi
 While this is effective for small-scale tasks, DDP is more scalable as it creates a separate process for each GPU, with each process having its own model replica.
 - DDP performs gradient synchronization across processes using more efficient communication (via NCCL), which scales better, especially when training on many GPUs or across multiple nodes. 
 DP, on the other hand, becomes less efficient with a larger number of GPUs because it involves a bottleneck in synchronizing gradients using a single process, making it harder to scale efficiently.
+
+
+Reference:
+
+1. https://github.com/dnddnjs/pytorch-multigpu/issues/6 
