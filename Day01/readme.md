@@ -1,3 +1,9 @@
+To D0:
+- Understand more about number of process per node
+- Implement MASTER PORT AND ADDRESS
+- To make the process to destroy automatically.
+- Basically to revamp all this in an efficient and standard manner like PyTorch.
+
 Objective: 
 - To understand DataParallel and Distributed Data Parallel(DDP) Training
 - Test with Kaggle T4 x2 ✅
