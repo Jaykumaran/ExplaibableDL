@@ -1,1 +1,4 @@
-# Cpp_learnings
+# xAI
+
+References:
+https://colah.github.io/
