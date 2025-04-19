@@ -37,7 +37,7 @@ def calibrate_cameras() :
     # List to store vectors of 2D projected points for every checkerboard image
     image_points_all = [] 
     
-    # Flags for chessboard corner search. Taken from opencv docs.
+    # Flags for chessboard (CB) corner search. Taken from opencv docs.
     flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK + cv2.CALIB_CB_NORMALIZE_IMAGE
     
     # Criteria for termination of the iterative corner refinement. Taken from opencv docs.
@@ -122,7 +122,7 @@ def camera_centers_from_extrinsics(extrinsics):
         rot = extrinsic[:3, :3]
         trans = extrinsic[:3, 3]
         center = -rot.T @ trans
-        center = np.append(center, 1)
+        center = np.append(center, 1) # appends 1 to convert to homogeneous
         camera_centers.append(center)
     
     return camera_centers
