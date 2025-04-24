@@ -279,4 +279,123 @@ class Map{
             }
             const size_t landmarks_after_cull = this->landmarks.size();
             std::printf("Culled: %zu points\n", landmarks_before_cull - landmarks_after_cull);
-        };
+        }
+    };
+
+class SLAM {
+    public:
+        Map mapp;
+    
+    public:
+        void process_frame(const cv::Matx33d& K, const cv::Mat& image_grey){
+            Frame frame(image_grey, K, cv::Mat::zeros(1, 4, CV_64F));
+            this->mapp.add_frame(frame);
+            // 
+            if (frame.id == 0){
+                return;
+            }
+            // Get the most recent pair of frames
+            Frame& frame_current = mapp.frames.at(Frame::id_generator - 1);
+            Frame& frame_previous = mapp.frames.at(Frame::id_generator -2);
+            // Helper functions for filtering matches
+            constexpr static const auto ratio_test = [](std::vector<std::vector<cv::DMatch>>& matches){
+                matches.erase(std::remove_if(matches.begin(), matches.end(), [](const std::vector<cv::DMatch>& options){
+                    return ((options.size()<= 1) || ((options[0].distance /  options[1].distance) > 0.75f));
+                }), matches.end());
+            };
+
+            constexpr static const auto symmetry_test = [](const std::vector<std::vector<cv::DMatch>> &matches1, const std::vector<std::vector<cv::DMatch>> &matches2, std::vector<std::vecor<cv::DMatch>>& symMatches){
+                symMatches.clear();
+                for (std::vector<std::vector<cv::DMatch>>::const_iterator matchIterator1 = matches1.begin(); matchIterator1 != matches1.end(); ++matchIterator1){
+                    for (std::vector<std::vector<cv::DMatch>>::const_iterator matchIterator2 = matches2.begin(); matchIterator2!= matches2.end();++matchIterator2){
+                        if ((*matchIterator1)[0].queryIdx == (*matchIterator2)[0].trainIdx &&(*matchIterator2)[0].queryIdx == (*matchIterator1)[0].trainIdx){
+                            symMatches.push_back({cv::DMatch((*matchIterator1)[0].queryIdx, (*matchIterator1)[0].trainIdx, (*matchIterator1)[0].distance)});
+                            break;
+                        }
+                    }
+                }
+            };
+
+            // Compute matches and filter
+            static cv::Ptr<cv::BFMatcher> matcher = cv::BFMatcher::create(cv::NORM_HAMMING);
+            std::vector<std::vectr<cv::DMatch>> matches_cp;
+            std::vector<std::vector<cv::DMatch>> matches_pc;
+            matcher->knnMatch(frame_current.des, frame_previous.des, matches_cp, 2);
+            matcher->knnMatch(frame_previous.des, frame_current.des, matches_pc, 2);
+            ratio_test(matches_cp);
+            ratio_test(matches_pc);
+            std::vector<std::vector<cv::DMatch>> matches;
+            symmetry_test(matches_cp, matches_pc, matches);
+            //Create final arrays of good matches
+            std::vector<int> match_point_current;
+            std::vector<int> match_point_previous;
+            for (const std::vector<cv::DMatch>& match : matches){
+                const cv::DMatch& m = match[0];
+                match_index_current.push_back(m.queryIdx);
+                match_point_current.push_back({static_cast<double>(frame_current.kps[static_cast<unsigned int>(m.queryIdx)].pt.x), 
+                                               static_cast<double>(frame_current.kps[static_cast<unsigned int>(m.queryIdx)].pt.y)});
+            }
+
+            std::printf("Matched %zu features to previous frame \n", matches.size());
+            // Pose estimation of new frame
+            if (frame_current.id < 2){
+                cv::Mat E;
+                cv::Mat R;
+                cv::Mat t;
+                int inliers = cv::RecoverPose(match_point_current, match_point_previous, frame_current.K, frame_current.dist
+                                                frame_previous.K, frame_previous.dist, E, R, t, cv::RANSAC, 0.999, 1.0);
+                cv::Matx33d rotation = {
+                    R.at<double>(0, 0), R.at<double>(0, 1), R.at<double>(0, 2),
+                    R.at<double>(1, 0), R.at<double>(1, 1), R.at<double>(1, 2),
+                    R.at<double>(2, 0), R.at<double>(2, 1), R.at<double>(2, 2),
+                };
+
+                cv::Matx31d translation = {
+                    t.at<double>(0),
+                    t.at<double>(1),
+                    t.at<double>(2)
+                };
+                // Recover pose seems to return pose 2 to pose 1 rather than pose 1 to pose 2, so invert it.
+                rotation = rotation.t();
+                translation = -rotation * translation;
+                // Set the initial pose of the new frame
+                frame_current.rotation = rotation * frame_previous.rotation;
+                frame_current.translation = frame_previous.translation + (frame_previous.rotation * translation);
+                std::printf("Inliers: %d inliers in pose estimation\n", inliers);
+            }
+
+            else {
+                // Set the initial pose of the new frame from the previous frame
+                frame_current.rotation  = frame_previous.rotation;
+                frame_current.translation = frame_previous.translation;
+            }
+
+            // Cache observations from the previous frame that are in this one
+            std::unordered_map<int, int> frame_previous_points; // key is kp_index and data ia landmark_id
+
+            for (const auto& [landmark_id, landmark_observations] : this.mapp.observations){
+                for (const auto& [frame_id, kp_index] : landmark_observations){
+                    if (frame_id == frame_previous.id){
+                        frame_previous_points[kp_index] = landmark_id;
+                    }
+                }
+            }
+            // Find matches that are already in the map as landmarks
+            int observations_of_landmarks = 0;
+            for (size_t i = 0; i < match_index_previous.size(); ++i){
+                auto found_point = frame_previous_points.find(match_index_previous[i]);
+                if (found_point != frame_previous_points.end()){
+                    // Add observations to features that match existing landmarks
+                    this->mapp.add_observation(frame_current, this->mapp.landmarks[found_point->second], match_index_current[i]);
+                    ++observations_of_landmarks; 
+                }
+            }
+
+            
+
+
+
+
+        }
+
+}
