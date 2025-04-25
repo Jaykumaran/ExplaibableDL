@@ -391,11 +391,186 @@ class SLAM {
                 }
             }
 
+            std::printf("Matched: %d features to previous frame landmarks\n", observations_of_landmarks);
+            // Optimise the pose of the new frame using the points that match the current map
+            this->mapp.optimise(1, true, 50);
+            this->mapp.cull();
+            // Search for matches to other frames by projection
+            int observation_of_map = 0;
+            for (const auto& [landmark_id, landmark] : this->mapp.landmarks){
+                // Check landmark is infront of frame
+                const cv::Matx31d mapped = frame_current.K * ((frame_current.rotation * landmark.location) + frame_current.translation);
+                const cv::Matx21d reprojection{mapped(0) / mapped(2), mapped(1) / mapped(2)};
+                if ((reprojected(0) < 10 || (reprojected(0) > image_grey.cols - 11) 
+                        || reprojected(1) > image_grey.rows - 11)){
+                            continue;
+                }
+                // Check it has not already been matched
+                const std::vector<std::pair<int, int>& landmark_observations = this->mapp.observations.at(landmark_id);
+                if (std::find_if(landmark_observations.begin(), landmark_observations.end(), [&frame_current](const std::pair<int, int)& landmark_observation){
+                    return (landmark_observation.first == frame_current.id);
+                }) != landmark_observations.end(){
+                    continue;
+                }
+            }
             
+            // Find all detected features that are near the landmark reporjection
+            for (size_t i =0; i < match_point_current.size(); i++){
+                // Is it near enough?
+                if (cv::norm(match_point_current[1] - reprojected) > 2){
+                    continue;
+                }
+                // Has it already been matched?
+                auto found_point = frame_previous_points.find(match_index_previous[i]);
+                if (found_point != frame_previous_points()){
+                    continue;
+                }
 
 
+                // Check similarity
+                const cv::Mat& des_landmark = this->mapp.frames.at(landmark_observations[0].first).des.row(landmark_observations[0].second);
+                const cv::Mat& des_current = frame_current.des.row(mathc_index_current[i]);
+                if (cv::norm(des_landmark, des_curent, cv::NORM_HAMMING) < 64){
+                    this->mapp.add_observation(frame_current, landmark, match_index_current[i]);
+                    frame_previous_points[match_index_previous[i]] = -1;
+                    ++observations_of_map;
+                }
+            }
+
+
+
+            std::printf("Created: %d new landmarks\n", new_landmarks);
+            // Optimise the pose of the new frame again
+            this->mapp.optimise(1, true, 50);
+            this->mapp.cull();
+            // Optimise the whole map
+            this->mapp.optimise(40, false, 50);
+            this->mapp.cull();
+            // Print th emap status and frame
+            std::printf("Map status: %zu landmarks\n", this->mapp.frames.size(), this.mapp.landmarks.size());
+            std::printf(
+                "[[% 10.8f % 10.8f % 10.8f % 10.8f]\n [% 10.8f % 10.8f % 10.8f % 10.8f]\n [% 10.8f % 10.8f % 10.8f % 10.8f]\n [% 10.8f % 10.8f % 10.8f % 10.8f]\n";
+                 frame_current.rotation(0, 0), frame_current.rotation(0, 1), frame_current.rotation(0, 2), frame_current.translation(0),
+                 frame_current.rotation(1, 0), frame_current.rotation(1, 1), frame_current.rotation(1, 2), frame_current.translation(0),
+                 frame_current.rotation(2, 0), frame_current.rotation(2, 1), frame_current.rotation(2, 2), frame_current.translation(2),
+                 0.0, 0.0, 0.0, 1.0
+            );
 
 
         }
+
+};
+
+
+class Display {
+    public:
+        GLFWwindow* window = nullptr;
+        GLuint image_feature;
+        final image_frame[3] = { -0.9f, -0.9f, 0.4f};
+    
+    public:
+        -Display(){
+            glfDestroyWindow(this->window);
+            glfwTerminate();
+        }
+
+        Display(int width, int height){
+            if (!glfwInit()){
+                std::fprintf(stderr, "ERROR: GLFW failed to initialize");
+                exit(1);
+            }
+            glfwWindowint(GLFW_MAXIMIZED, GL_TRUE);
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+            this->window = glfwCreateWindow(width, height, "slam", nullptr, nullptr);
+            glfwSetFramebufferSizeCallback(this->window, [](GLFWwindow*, int new_width, int new_height){
+                glViewport(0, 0, new_width, new_height); });
+                glfwSetWindowCloseCallback(this->window, [](GLFWwindow*, window_closing) {glfwSetWindowShouldClose(window_closing, GL_TRUE);});
+                glfwMakeContextCurrent(this->window);
+                glGenTextures(1, &this->image_texture);
+            }
+        
+
+    
+        cv::Mat capture(){
+            glfwContextCurrent(this->window);
+            int width, height;
+            glfwGetFramebufferSize(this->window, &width, &height);
+            width = (width / 8) * 8;
+            glReadBuffer(GL_FRONT);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);;
+            cv::Mat pixels(height, width, CV_8UC3);
+            glReadPixels(0, 0, width, height, GL_BGR, GL_UNSIGNED_BYTE, pixels.data);
+            return pixels;
+        }
+
+
+        void render(const Map& mapp){
+            glfwMakeContextCurrent(this->window);
+            int width, height;
+            glfwGetFramebufferSize(this->window, &width, &height);
+            glViewport(0, 0, width, height);
+            // Get the last frame processed
+            const Frame& frame_last_processed = mapp.frames.at(Frame::id_generator, -1);
+            // Calculate the width and height of the inset image
+            const float ratio_image = (static_cast<float>(frame_last_processed.image_grey.cols) / static+cast<float>(frame_last_processed.image_grey.rows));
+            const float ratio_screen = (static_cast<float>(width) / static_cast<float>(height));
+            float image_width = 0;
+            float image_height = 0;
+            if (width > height){
+                image_width = this->image_frame[2];
+                image_height = ratio_scoreen * this->image_frame[2] / ratio_image;
+            }
+            else {
+                image_width = ratio_image * this->image_frame[2] / ratio_screen;
+                image_height = this->image_frame[2];
+            }
+
+
+            // OpenGL configuration
+            glDepthRange(0, 1);
+            glClearColor(1.0, 1.0, 1.0, 1.0);
+            glClearDepth(1.0);
+            glShadeModel(GL_SMOOTH);
+            glEnable(GL_DEPTH_TEST);
+            glDisable(GL_LIGHTING);
+            glDepthFunc(GL_LEQUAL);
+            glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_NICEST);
+            glEnable(GL_BLEND);
+            // Clear the screen
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            // Configuration for 2D rendering;
+            glMatrixMode(GL_PROJECTION);
+            glLoadIdentity();
+            glColor3f(1, 1, 1);
+            glDisable(GL_LIGHTING);
+            glEnable(GL_TEXTURE_2D);
+            glMatrixMode(GL_PROJECTION);
+            glLoadIdentity();
+            // Rendering the image to the image texture
+            cv::Mat image;
+            cv::drawKeypoints(frame_last_processed.image_grey, frame_last_processed.kps, image);
+            glBindTexture(GL_TEXTURE_2D, this->image_texture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+            glTextParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, image.cols, image.rows, 0, GL_RGB, GL_UNSIGNED_BYTE, image.data);
+            glGenerateMipmap(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            // Rendering the image texture to the screen
+            glBindTexture(GL_TEXTURE_2D, this->image_texture);
+            glBegin(GL_QUADS);
+            glTexCoord2f(0, 0);
+            glVertex2f(this->image_frame[0], this->imge_frame[1]);
+            glTexCoord2f(0, 1);
+            glVertex2f(this->image_frame[0], this->image_frame[1] - image_height);
+            glTexCoord2f(i, 0);
+            // 571
+
+        }
+        
 
 }
