@@ -1,54 +1,100 @@
 // OpenGL
-#define GL_GLEXT_PROTOTYPES
-#include <GL/gl.h>
-#include <GL/glu.h>
+#define GL_GLEXT_PROTOTYPES  // preprocessor macro definition ; the macro preprocessor is a powerful but primitive text‐substitution step that gives you file inclusion, conditional compilation, and simple “find-and-replace” macros.
+#include <GL/gl.h> // core OpenGL API
+#include <GL/glu.h> // OpenGL utility library
 #include <GLFW/glfw3.h>
+/*
+glfw.h inclues header for GLFW, lightweight cross platform library for creating, 
+ - OpenGL context and window
+ - Processing user input
+ - Managing the main loop and buffer swapping
+Allows to call functions like glfwInit(), glfwCreateWindow(), and glfwPollEvents().
+*/
 
 // OpenCV
 #include <opencv2/opencv.hpp>
 
-// g2o
-#define G2O_USE_VENDORED_CERES
-#include <g2o/core/block_solver.h>
-#include <g2o/core/optimization_algorithm_levenberg.h>
-#include <g2o/core/robust_kernel_impl.h>
-#include <g2o/solvers/eigen/linear_solver_eigen.h>
+// g2o general graph optimization  - Non linear framework For Bundle Adjustment
+// tells g2o to compile against the copy of Ceres Solver that comes bundled (“vendored”) with g2o, rather than expecting me to link an external Ceres library. This can simplify dependencies if i don’t already have Ceres installed.
+#define G2O_USE_VENDORED_CERES 
+// Declares the BlockSolver template class, which manages the partitioning of our problem into “blocks” of variables (e.g. 6‐DoF poses and 3D points) and sets up the Schur‐complement trick for efficient linearization.
+#include <g2o/core/block_solver.h> 
+// Defines OptimizationAlgorithmLevenberg, a Levenberg–Marquardt wrapper that drives the iterative solve: it linearizes our error terms, forms normal equations, applies damping, and updates the estimate each round.
+#include <g2o/core/optimization_algorithm_levenberg.h> 
+// Provides outlier‐resistant “robust kernels” (e.g. Huber, Cauchy). We attach one to each edge so that large reprojection errors (from bad correspondences) get down‐weighted rather than derailing the entire optimization.
+#include <g2o/core/robust_kernel_impl.h> 
+// Supplies a LinearSolverEigen implementation that uses Eigen’s sparse linear algebra routines under the hood. The block solver needs a linear solver to invert or factor the Hessian‐approximation matrix at each LM step.
+#include <g2o/solvers/eigen/linear_solver_eigen.h> 
+/*
+Pulls in the ready-made types for “six‐degree‐of‐freedom with exponential map”:
+- VertexSE3Expmap for camera poses (rotation + translation).
+- EdgeSE3ProjectXYZ for projecting 3D points into a pose, measuring reprojection error.
+- VertexPointXYZ for the 3D landmarks themselves.
+*/
 #include <g2o/types/sba/types_six_dof_expmap.h>
 
 // Standard
-#include <chrono>
-#include <cstdio>
-#include <unordered_map>
+#include <chrono> // timing tools
+#include <cstdio> // Printf style logging
+#include <unordered_map>  // a hash‐table–based associative container that offers average O(1) lookup, insertion, and deletion by key.
 #include <vector>
 
 class Frame {
 public:
-    static inline int id_generator = 0;
-    int id;
+    // Static: One shared counter across all Frame instances; Assign unique id to every new frame
+    static inline int id_generator = 0; 
+    // saves this frame's unique identifier set in constructor form 
+    int id;  
+    // grayscale image matrix
     cv::Mat image_grey;
+    // camera intrinsics K
     cv::Matx33d K;
+    // Distorting coefficients (radius or tangential) for undistoring 2D points
     cv::Mat dist;
+    // List of detected feature locations (with size & orientation) in the image
     std::vector<cv::KeyPoint> kps;
+    // Corresponding descriptors
     cv::Mat des;
+    // Pose of this camera in the world; a 3x3 rotation and 3x1 translation vector
     cv::Matx33d rotation;
     cv::Matx31d translation;
 public:
+    // Compiler generate ctor(constructor); leaves members uninitialized (to fill them later)
     Frame() = default;
+    // Main parameterized constructor 
     Frame(const cv::Mat& input_image_grey, const cv::Matx33d& input_K, const cv::Mat& input_dist) {
+        // One ORB detector/descriptor instance shared across all frames
         static cv::Ptr<cv::ORB> extractor = cv::ORB::create();
+        // Assign the current frame's id, then increment the global counter
         this->id = Frame::id_generator++;
+        // copy input's into object attributes similar to self logic
         this->image_grey = input_image_grey;
         this->K = input_K;
         this->dist = input_dist;
+        // decalres a vector -  corners
         std::vector<cv::Point2f> corners;
-        cv::goodFeaturesToTrack(image_grey, corners, 3000, 0.01, 7);
+        // Shi-Tomasi corner detection with (upto 3000 strong corners, 0.01 quality level, 7 px minimum distance)
+        cv::goodFeaturesToTrack(
+                image = image_grey, 
+                corners = corners,
+                maxCorners = 3000,
+                quality =  0.01,
+                minDist =  7);
+        // Reserves memory in kps so that it can hold atleast corners.size() elements without needig to re-allocate ensurings single allocation
         this->kps.reserve(corners.size());
+        // iterates over each element of the corners array by reference (avoiding a copy)
+        // Each corner hold an (x,y) coordinate in the image where the feature is detected
         for (const cv::Point2f& corner : corners) {
-            this->kps.push_back(cv::KeyPoint(corner, 20));
+            // Creates a keypoint centered at (corner.x corner.y) with a patch size (diameter of keypoint) of 20 pixels.
+            // Append new kp at end of kps vector cuz previously reserved enough space avoids reallocation
+            this->kps.push_back(cv::KeyPoint(pt = corner, _size = 20));
         }
+        // Compuet ORB descriptors for all keypoints and store them in des.
         extractor->compute(image_grey, this->kps, this->des);
+        // Initialize camera pose to "identity" (i.e. at the world origin looking down Z)
         this->rotation = cv::Matx33d::eye();
         this->translation = cv::Matx31d::zeros();
+        // Log how many features were extracted in this frame
         std::printf("Detected: %zu features\n", this->kps.size());
     }
 };
