@@ -76,12 +76,12 @@ public:
         // decalres a vector -  corners
         std::vector<cv::Point2f> corners;
         // Shi-Tomasi corner detection with (upto 3000 strong corners, 0.01 quality level, 7 px minimum distance)
-        cv::goodFeaturesToTrack(
-                image = image_grey, 
-                corners = corners,
-                maxCorners = 3000,
-                quality =  0.01,
-                minDist =  7);
+        cv::goodFeaturesToTrack(  
+                image_grey,  //image
+                corners, // corners
+                3000, // maxCorners
+                0.01, // quality
+                7); // minDist
         // Reserves memory in kps so that it can hold atleast corners.size() elements without needig to re-allocate ensurings single allocation
         this->kps.reserve(corners.size());
         // iterates over each element of the corners array by reference (avoiding a copy)
@@ -89,7 +89,7 @@ public:
         for (const cv::Point2f& corner : corners) {
             // Creates a keypoint centered at (corner.x corner.y) with a patch size (diameter of keypoint) of 20 pixels.
             // Append new kp at end of kps vector cuz previously reserved enough space avoids reallocation
-            this->kps.push_back(cv::KeyPoint(pt = corner, _size = 20));
+            this->kps.push_back(cv::KeyPoint(corner, 20)); // pt = corner, _size = 20
         }
         // Compuet ORB descriptors for all keypoints and store them in des.
         extractor->compute(image_grey, this->kps, this->des);
@@ -169,7 +169,7 @@ public:
         // Undistort 
         // Takes distorted image coordinates and undistorted coordinates (ideal pinhole camera model)
         // Uses K and distortion coeffs to produce normalized, undistorted coords
-        cv::undistortPoints(src = std::vector<cv::Point2d>{lhs_point}, lhs_point_normalised, lhs_frame.K, lhs_frame.dist);
+        cv::undistortPoints(std::vector<cv::Point2d>{lhs_point}, lhs_point_normalised, lhs_frame.K, lhs_frame.dist);
         // Normalized points rhs (cam2)
         std::vector<cv::Point2d> rhs_point_normalised;
         cv::undistortPoints(std::vector<cv::Point2d>{rhs_point}, //crc
@@ -180,7 +180,7 @@ public:
                             cv::noArray()); // T
 
 
-        cv::Mat potential_landmark(rows = 4,cols= 1, type = CV_64F);
+        cv::Mat potential_landmark(4, 1, CV_64F); // rows, cols, type
 
         // triangulatePoints: implements linear triangulation (e.g. SVD or DLT), solving:
         //   [ p1 × (P1 X)
@@ -215,6 +215,7 @@ public:
         return cv::Matx41d{
             // .at<double>(0) directly accesses the stored double element (no runtime type conversion)
             potential_landmark.at<double>(0),   // accessing element at a specified index pos
+            potential_landmark.at<double>(1),
             potential_landmark.at<double>(2),
             potential_landmark.at<double>(3)
         };
@@ -375,7 +376,7 @@ public:
                 // Vertex 1: the camera pose’s variable ID is exactly frame_id
                 edge->setVertex(1, opt.vertex(frame_id));
                 // Bookkeeping: count how many of these edges actually connect optimizable variables.
-                if ((landmark_id >= 0)) && (frame_id > (fix_landmarks == false)) {
+                if ((frame_id > (fix_landmarks == false)) && (landmark_id >= 0)) {
                     ++non_fixed_edges;
                 }
                 // Tell g2o “my observed pixel is (u, v) = (cvkp.x, cvkp.y)”. That becomes the measurement it will try to fit.
@@ -1204,9 +1205,12 @@ int main(int argc, char* argv[]) {
         if  ((0)) {
             cv::Mat screen_capture = display.capture();
             cv::flip(screen_capture, screen_capture, 0);
-            static cv::VideoWriter video("output.avi", cv::VideoWriter::fourcc('M','J','P','G'), 10, cv::Size(screen_capture.cols, screen_capture.rows));
+            static cv::VideoWriter video(
+                                    "output.avi", 
+                                    cv::VideoWriter::fourcc('M','J','P','G'),
+                                    10,
+                                    cv::Size(screen_capture.cols, screen_capture.rows));
             video.write(screen_capture);
         }
         std::printf("\n");
-    }
-}
+    } }

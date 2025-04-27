@@ -9,11 +9,23 @@ https://github.com/gpdaniels/slam/
 
 
 ```
-bash setup.sh
+bash setup.sh 
 > mkdir build
 > cd build
 > cmake -DCMAKE_BUILD_TYPE=Release ..
+# Runs CMake to generate platform-specific build files (Makefiles, Visual Studio projects, etc.).
+
+# -DCMAKE_BUILD_TYPE=Release tells CMake to set up an optimized release build (turning on compiler optimizations, turning off debug symbols).
+
+# .. points CMake back to your project root (where your CMakeLists.txt lives), telling it “read that file to know what to build.”
+
 > cmake --build . --config Release
+
+# Tells CMake to actually compile and link your code now that the build files are in place.
+
+# --build . means “build using the files generated in the current directory (build/).”
+
+# --config Release (mainly relevant on multi-configuration generators like Visual Studio) says “use the Release configuration” that you just set up.
 ```
 
 
