@@ -599,7 +599,7 @@ public:
         };
 
 
-
+        // Establish Correspondence --> Feature Matching
 
         // Compute matches and filter.
         // Create matcher; cv::Ptr<> is OpenCV’s reference-counted smart pointer; BFMatcher does brute-force matching of binary descriptors (ORB uses binary patterns).
@@ -646,12 +646,23 @@ public:
 
 
         // Pose estimation of new frame.
+        // We only run this “essential‐matrix + recoverPose” step for the very first motion (i.e. when we’ve got frame 0→frame 1). 
+        // After that, we just copy the previous pose as an initialization.
         if (frame_current.id < 2) {
-            cv::Mat E;
-            cv::Mat R;
-            cv::Mat t;
-            int inliers = cv::recoverPose(match_point_current, match_point_previous, frame_current.K, frame_current.dist, frame_previous.K, frame_previous.dist, E, R, t, cv::RANSAC, 0.999, 1.0);
-            cv::Matx33d rotation = {
+            cv::Mat E; // E will hold the essential matrix (3×3),
+            cv::Mat R; // R will be the recovered rotation (3×3),
+            cv::Mat t; // t will be the recovered translation vector (3×1).            
+            int inliers = cv::recoverPose(match_point_current, // points1
+                                         match_point_previous, // points2
+                                         frame_current.K,      // cameraMatrix1
+                                         frame_current.dist,   // distCoeffs1 ; distortion
+                                         frame_previous.K,     // cameraMatrix2
+                                         frame_previous.dist,  // distCoeffs2
+                                         E, R, t,              // outputs
+                                         cv::RANSAC,           // method
+                                         0.999,                // confidence that the estimated pose is correct (99.99% indicates very high)
+                                         1.0);                 // threshold: maximum allowed reprojection error to consider an inlier (in pixels)
+            cv::Matx33d rotation = {        
                 R.at<double>(0, 0), R.at<double>(0, 1), R.at<double>(0, 2), 
                 R.at<double>(1, 0), R.at<double>(1, 1), R.at<double>(1, 2), 
                 R.at<double>(2, 0), R.at<double>(2, 1), R.at<double>(2, 2),
@@ -662,97 +673,196 @@ public:
                 t.at<double>(2)
             };
             // Recover pose seems to return pose 2 to pose 1 rather than pose 1 to pose 2, so invert it.
-            rotation = rotation.t();
+            rotation = rotation.t(); // measured 
             translation = -rotation * translation;
             // Set the initial pose of the new frame.
             frame_current.rotation = rotation * frame_previous.rotation;
             frame_current.translation = frame_previous.translation + (frame_previous.rotation * translation);
             std::printf("Inliers: %d inliers in pose estimation\n", inliers);
         }
+        // we just copy the previous pose as an initialization.
         else {
             // Set the initial pose of the new frame from the previous frame.
             frame_current.rotation = frame_previous.rotation;
             frame_current.translation = frame_previous.translation;
         }
-        // Cache observations from the preious frame that are in this one.
+
+
+        // Cache observations from the previous frame that are in this one.
+
         std::unordered_map<int, int> frame_previous_points; // key is kp_index and data is landmark_id.
-        for (const auto& [landmark_id, landmark_observations] : this->mapp.observations) {
-            for (const auto& [frame_id, kp_index] : landmark_observations) {
+        for (const auto& [landmark_id, landmark_observations] : this->mapp.observations) { // this->mapp.observations is the map from each landmark ID → a list of (frame_id, kp_index) pairs.
+            // Loop over every observation of this landmark
+            // Each entry says “this landmark appeared in frame frame_id at keypoint index kp_index.”
+            for (const auto& [frame_id, kp_index] : landmark_observations) { // landmark_observations is the std::vector<std::pair<int,int>> of where that landmark has been seen.                
+                // We only care about observations that happened in frame_previous (the frame right before the current one).
+                // 
                 if (frame_id == frame_previous.id) {
+                    // Whenever a landmark was seen in that frame, we record:
                     frame_previous_points[kp_index] = landmark_id;
                 }
             }
+        // So now `frame_previous_points` lets us, in O(1), ask “if I have a keypoint index j in the previous frame, was that already part of my map? And if so, which landmark?”
         }
+
+        /*python
+
+        observations_of_landmarks = 0  # Fast way to ask: which keypoint matches a 3D landmark?
+
+        # Loop over all matched keypoints
+        for i in range(len(match_index_previous)):
+            found_point = frame_previous_points.get(match_index_previous[i])
+            if found_point is not None:
+                # Add observation to the corresponding landmark
+                self.mapp.add_observation(frame_current, self.mapp.landmarks[found_point], match_index_current[i])
+                observations_of_landmarks += 1
+        */
+
         // Find matches that are already in the map as landmarks.
-        int observations_of_landmarks = 0;
+        int observations_of_landmarks = 0; // We want a fast way to ask, “Given a keypoint index in the previous frame, which 3D landmark does it correspond to (if any)?”
+        // Loop over all landmarks in the map
+        // match_index_previous is the list of keypoint indices in the previous frame that matched up (via descriptor matching) with keypoints in the current frame.
+        // We’ll iterate over each matched pair by index i. 
         for (size_t i = 0; i < match_index_previous.size(); ++i) {
-            auto found_point = frame_previous_points.find(match_index_previous[i]);
+            // does this matched keypoint in the previous frame already correspond to a known landmark?
+            // find(...) looks up match_index_previous[i] in our cache.
+            // If it isn’t in the map, this keypoint wasn’t in any landmark yet.
+            auto found_point = frame_previous_points.find(match_index_previous[i]);     
+            // If it isn’t in the map, this keypoint wasn’t in any landmark yet.      
             if (found_point != frame_previous_points.end()) {
                 // Add observations to features that match existing landmarks.
+                // We already have a Landmark object landmarks[found_point->second].
+                // 
                 this->mapp.add_observation(frame_current, this->mapp.landmarks[found_point->second], match_index_current[i]);
-                ++observations_of_landmarks;
+                ++observations_of_landmarks; //Increment observations_of_landmarks to keep track of how many existing landmarks got one more “vote” from this frame.
             }
         }
+        /*
+        - Data association: before we try to triangulate new points, we must first “track” the points we already know about.
+
+        - By caching and looking up this reverse‐map, we efficiently add observations of existing landmarks into the factor graph.
+
+        - Those new edges will be fed into the bundle adjustment (optimise()) so that the pose of the new frame and the 3D point positions can both be refined, taking into account these re‐observations.
+        */
         std::printf("Matched: %d features to previous frame landmarks\n", observations_of_landmarks);
+
+
+
         // Optimise the pose of the new frame using the points that match the current map.
+        // Run local bundle adjustment
+        // Refine new frame's pose against the current map points:
+        // 1 = include only the most recent frame and its observations
+        // true = Keep all the landmarks fixed
+        // Do 50 Levenberg-Marquardt iterations , This refines only the new frames pose to better fit the already-mapped points
         this->mapp.optimise(1, true, 50);
+        // Remove landmarks that are eithe seen two few times or have high reprojection error. Keeps the map clean of bad points
         this->mapp.cull();
         // Search for matches to other frames by projection.
-        int observations_of_map = 0;
+        int observations_of_map = 0; // Try to re‐associate existing map points by projecting them into the new frame:
         for (const auto& [landmark_id, landmark] : this->mapp.landmarks) {
             // Check landmark is infront of frame.
+            //  Project the 3D point into pixel coordinates:
             const cv::Matx31d mapped = frame_current.K * ((frame_current.rotation * landmark.location) + frame_current.translation);
+            // Divide by z to get (u,v) image coordinates.
             const cv::Matx21d reprojected{mapped(0) / mapped(2), mapped(1) / mapped(2)};
+            //  Discard if it lands too close to the image border:
+            //  ignore points that project off‐screen or within 10 px of the edge (so we can safely sample descriptors).
             if ((reprojected(0) < 10) || (reprojected(0) > image_grey.cols - 11) || (reprojected(1) < 10) || (reprojected(1) > image_grey.rows - 11)) {
-                continue;
+                continue; // early exits if its in borders for the current landmark_id
             }
+
+
+            /*python
+            landmark_observations = self.mapp.observations[landmark_id]
+
+            # Don’t re-add an observation if we’ve already matched this landmark to the new frame.
+            if any(obs[0] == frame_current.id for obs in landmark_observations):
+                continue
+            */
             // Check it has not already been matched.
             const std::vector<std::pair<int, int>>& landmark_observations = this->mapp.observations.at(landmark_id);
+            //  don’t re‐add an observation if we’ve already matched this landmark to the new frame.
             if (std::find_if(landmark_observations.begin(), landmark_observations.end(), [&frame_current](const std::pair<int, int>& landmark_observation){
                 return (landmark_observation.first == frame_current.id);
             }) != landmark_observations.end()) {
                 continue;
             }
+
+            // test each *detected* feature in the current frame:
             // Find all detected features that are near the landmark reprojection.
             for (size_t i = 0; i < match_point_current.size(); ++i) {
                 // Is it near enough?
+                // Proximity test: must lie within 2 px of the reprojected location
+                // cv::norm computes Euclidean distance; only consider features that lie very close (≤2 px) to where the map point projects.
                 if (cv::norm(match_point_current[i] - reprojected) > 2) {
                     continue;
                 }
-                // Has it already been matched?
+                // Has it already been matched? 
                 auto found_point = frame_previous_points.find(match_index_previous[i]);
-                if (found_point != frame_previous_points.end()) {
+                // Skip if that feature was already used to track a landmark:
+                if (found_point != frame_previous_points.end()) { // ensure we don’t double‐use the same previous‐frame keypoint.
                     continue;
                 }
-                // Check similarity.
-                // TODO: Only checking first descriptor.
-                const cv::Mat& des_landmark = this->mapp.frames.at(landmark_observations[0].first).des.row(landmark_observations[0].second);
+                // ******Check similarity**********
+                // Descriptor test: compare landmark’s descriptor v/s this feature’s
+
+                // Fetch the stored landmark descriptor by indexing into the old frame’s des matrix.
+                const cv::Mat& des_landmark = this->mapp.frames
+                                                              .at(landmark_observations[0].first) // frame of first obs
+                                                              .des.row(landmark_observations[0].second);
+                // Fetch the current descriptor by row index.
                 const cv::Mat& des_current = frame_current.des.row(match_index_current[i]);
+                //  if the two descriptors are sufficiently similar (threshold = 64), we accept this as the same 3D point.
                 if (cv::norm(des_landmark, des_current, cv::NORM_HAMMING) < 64) {
+                    // If All tests passed → record the new observation
                     this->mapp.add_observation(frame_current, landmark, match_index_current[i]);
+                    // Marks the old keypoint as used (= -1).
                     frame_previous_points[match_index_previous[i]] = -1;
                     ++observations_of_map;
                 }
+                // This “re‐projection” step boosts tracking robustness: even if a feature matcher missed some map points originally,
+                // projecting known 3D points and then doing a small descriptor check recovers extra correspondences without requiring a
+                // full descriptor‐to‐descriptor search.
             }
+        /*
+        - Local BA refines the new camera’s pose against the fixed map.
+
+        - Cull removes outlier landmarks.
+
+        - Re‐projection search projects each remaining 3D point into the image, then looks for a nearby feature whose descriptor matches.
+
+        - Add new observations for those that pass proximity + descriptor tests.
+
+        - Log how many map points is re‐associated.
+
+        */
+        
         }
         std::printf("Matched: %d features to map landmarks\n", observations_of_map);
+
+
         // Optimise the pose of the new frame using reprojected points from the current map.
-        this->mapp.optimise(1, true, 50);
-        this->mapp.cull();
+        this->mapp.optimise(1, true, 50); // keep all 3D points fixed, only adjust the new frame's pose
+        this->mapp.cull(); // Refines the new camera pose against the existing map points before you try to add brand-new ones.
+
         // Add all the remaing matched features.
+        // 👉 ***** Triangulating Brand-New Points *********
         int new_landmarks = 0;
         for (size_t i = 0; i < match_index_previous.size(); ++i) {
             auto found_point = frame_previous_points.find(match_index_previous[i]);
-            if (found_point == frame_previous_points.end()) {
-                // New landmark to be triangulated.
+            if (found_point == frame_previous_points.end()) { // Only proceed if this match didn’t correspond to an existing map point. i.e. *found_point = None*
+                // New landmark to be triangulated. 
+
+                // uses the two camera projection matrices plus the undistorted 2D observations to solve for a 4×1 homogeneous point [X, y, Z, W]
                 cv::Matx41d point = Map::triangulate(frame_current, frame_previous, frame_current.kps[static_cast<unsigned int>(match_index_current[i])].pt, frame_previous.kps[static_cast<unsigned int>(match_index_previous[i])].pt);
-                // Valid triangulation?
-                if (std::abs(point(3)) < 1e-5) {
+                // Valid triangulation? Discard degenerate cases
+                if (std::abs(point(3)) < 1e-5) { // point(3) is the homogeneous scale W. If it’s effectively zero, the intersection was ill-posed.
                     continue;
                 }
-                cv::Matx31d pt = {point(0) / point(3), point(1) / point(3), point(2) / point(3)};
-                // Reproject infront of both cameras?
+                cv::Matx31d pt = {point(0) / point(3), point(1) / point(3), point(2) / point(3)}; // Normaluze / W
+                // Reproject infront of both cameras?  Ensure the point lies in front of each camera
                 const cv::Matx31d mapped_previous = frame_previous.K * ((frame_previous.rotation * pt) + frame_previous.translation);
+                // Checks the Z coordinate is positive (in front of the camera).
                 if (mapped_previous(2) < 0) {
                     continue;
                 }
@@ -760,8 +870,10 @@ public:
                 if (mapped_current(2) < 0) {
                     continue;
                 }
-                // Reprojection error is low?
+                // Reprojection error is low? Check reprojection error is small in both views (previous and current)
+                // Projects back into pixel space (u=x/z,v=y/z).
                 const cv::Matx21d reprojected_previous = {mapped_previous(0) / mapped_previous(2), mapped_previous(1) / mapped_previous(2)};
+                // Compares against the original matched keypoint positions; rejects if the Euclidean pixel‐error > 2 px.
                 if (cv::norm(match_point_previous[i] - reprojected_previous) > 2) {
                     continue;
                 }
@@ -770,21 +882,28 @@ public:
                     continue;
                 }
                 // Add it.
+                // Build a grayscale “colour” value: Samples the gray‐value at the keypoint and normalizes to [0,1] for a “monochrome” color.
                 double colour = static_cast<double>(image_grey.at<unsigned char>(frame_current.kps[static_cast<unsigned int>(match_index_current[i])].pt)) / 255.0;
+                // Create & store the Landmark: Instantiate a new Landmark with position pt and that colour triple.
                 Landmark landmark(pt, cv::Matx31d{colour, colour, colour});
-                this->mapp.add_landmark(landmark);
-                this->mapp.add_observation(frame_previous, landmark, match_index_previous[i]);
+                this->mapp.add_landmark(landmark); // inserts it into your map’s landmark container.
+                // Record its observations in both frames
+                this->mapp.add_observation(frame_previous, landmark, match_index_previous[i]); // links that 3D point to the two keypoints you just used, so future BA knows about it.
                 this->mapp.add_observation(frame_current, landmark, match_index_current[i]);
                 ++new_landmarks;
             }
         }
         std::printf("Created: %d new landmarks\n", new_landmarks);
-        // Optimise the pose of the new frame again.
+
+        // *** Post Triangulation and clean up ****
+        // Refine the pose of the new frame again.
         this->mapp.optimise(1, true, 50);
         this->mapp.cull();
-        // Optimise the whole map.
+        // Optimise the whole map; Run a larger local (BA) (include nore franes and points)
         this->mapp.optimise(40, false, 50);
         this->mapp.cull();
+
+        // And output the new frame’s full 4×4 pose matrix
         // Print the map status and pose.
         std::printf("Map status: %zu frames, %zu landmarks\n", this->mapp.frames.size(), this->mapp.landmarks.size());
         std::printf(
@@ -1032,30 +1151,33 @@ public:
     }
 };
 
+// argc = count of command-line arguments (including program name), argv = array of C-strings.
 int main(int argc, char* argv[]) {
     std::printf("Launching slam...\n");
-    if (argc < 3) {
-        std::printf("Usage %s [video_file.ext] [focal_length]\n", argv[0]);
+    if (argc < 3) { // Checks that the user provided at least two arguments (video file, focal length). If not print usage hint!
+        std::printf("Usage %s [video_file.ext] [focal_length]\n", argv[0]); // 
         exit(1);
     }
+
     std::printf("Loading video...\n");
-    std::printf("  video_file:   %s\n", argv[1]);
+    std::printf("  video_file:   %s\n", argv[1]); // Shows which file and focal length you’re about to use.
     std::printf("  focal_length: %s\n", argv[2]);
     cv::VideoCapture capture(argv[1]);
-    double F = std::atof(argv[2]);
+    // This F will populate camera’s intrinsic matrix K.
+    double F = std::atof(argv[2]); // Converts the focal-length string to a double (e.g. “800” → 800.0). // atof - ascii to float
     std::printf("Loading camera parameters...\n");
     int width = static_cast<int>(capture.get(cv::CAP_PROP_FRAME_WIDTH));
     int height = static_cast<int>(capture.get(cv::CAP_PROP_FRAME_HEIGHT));
     int frame_count = static_cast<int>(capture.get(cv::CAP_PROP_FRAME_COUNT));
     cv::Matx33d K = {
-        F, 0, static_cast<double>(width)/2.0,
+        F, 0, static_cast<double>(width)/2.0, // We assume principal centre lies at centre of an image; so image_width/2, image_height/2
         0, F, static_cast<double>(height)/2.0,
         0, 0, 1
     };
     std::printf("Loading display [%d %d]...\n", width, height);
     Display display(width, height);
     std::printf("Loading slam driver...\n");
-    SLAM slam;
+    SLAM slam; // instantiate SLAM object with default
     std::printf("Processing frames...\n");
     int i = 0;
     while (capture.isOpened()) {
