@@ -18,7 +18,7 @@ Allows to call functions like glfwInit(), glfwCreateWindow(), and glfwPollEvents
 // g2o general graph optimization  - Non linear framework For Bundle Adjustment
 // tells g2o to compile against the copy of Ceres Solver that comes bundled (“vendored”) with g2o, rather than expecting me to link an external Ceres library. This can simplify dependencies if i don’t already have Ceres installed.
 #define G2O_USE_VENDORED_CERES 
-// Declares the BlockSolver template class, which manages the partitioning of our problem into “blocks” of variables (e.g. 6‐DoF poses and 3D points) and sets up the Schur‐complement trick for efficient linearization.
+// Declares the BlockSolver template class, which manages the partitioning of our problem into “blocks” of variables (e.g. 6‐DoF poses and 3D points) and sets up the Schur‐complement trick for efficient linearization. // filters degenerates and helps to reduce search space
 #include <g2o/core/block_solver.h> 
 // Defines OptimizationAlgorithmLevenberg, a Levenberg–Marquardt wrapper that drives the iterative solve: it linearizes our error terms, forms normal equations, applies damping, and updates the estimate each round.
 #include <g2o/core/optimization_algorithm_levenberg.h> 
@@ -266,7 +266,7 @@ public:
             if ((local_window > 0) && (frame_id < local_window_below)) {
                 continue;
             }
-            // 2) Convert OpenCV pose --> g2o SE3Quat
+            // 2) Convert OpenCV pose --> g2o SE3Quat // Spatial Euclidean Group SE(3) --> set of all 3D rotations + translations
             // frame.rotation is a CV Matx (row-major), but Eigen wants column-major, so you take its transpose (.t()) and then map its raw .val array into an Eigen::Matrix3d.
             const g2o::Matrix3 rotation = Eigen::Map<const Eigen::Matrix3d>(frame.rotation.t().val); // Eigen is column major.
             // 
@@ -292,79 +292,159 @@ public:
                 landmark_id_start = frame_id + 1;
             }
         }
-        // Add landmarks.
-        int non_fixed_landmarks = 0;
+
+        // *****************Add landmarks*********************
+        // keep track of how many landmark vertices and measurement edges we added that are not fixed.
+        int non_fixed_landmarks = 0; 
         int non_fixed_edges = 0;
+        // loop over every landmark in the map
+        // .py equivalent: ```for (landmark_id, landmark) in self.landmarks.items()```
+        // this->landmarks is an unordered_map<int, Landmark> *unpack into landmark_id(key) and landmark (the Landmark object)
         for (const auto& [landmark_id, landmark] : this->landmarks) {
+            // 2a) Decides whether this landmark lies within the local window of recent frames
+            // In local BA we only optimize points seen in a certain range of recent frames
             bool in_local = false;
-            for (const auto& [frame_id, kp_index] : this->observations[landmark_id]) {
-                if ((local_window == 0) || (!(frame_id < local_window_below))) {
+            // We scan observations[landmark_id] which lists all (frame_id, kp_index) pairs where this landmark was seen
+            // .py equivalent : ```for frame_id, kp_index in self.observations[landmark_id].items():```
+            for (const auto& [frame_id, kp_index] : this->observations[landmark_id]) { 
+                // If local_window ==0 , we treat everything as "in local"
+                // Otherwise check that at least one of those frame_id values is ≥ local_window_below (i.e.within our sliding window)
+                if ((local_window == 0) || ((frame_id >= local_window_below))) {
                     in_local = true;
                     break;
                 }
             }
+            // If none are recent, we continue and skip the landmark entirely
             if (!in_local) {
                 continue;
             }
+            /*
+            this->observations[landmark_id] --> // Use operator[] when you intend to insert a default element if the key might be missing (e.g. building up your observations as you go).
+
+            this->landmarks.at(landmark_id) --> // Use .at() when you want to access something you know must already exist, and you’d rather get an exception than accidentally create a bogus entry.
+                                                // Will std::out_of_range error if doen't exist
+            */
+            // .py eq: cvpt = self.landmarks[landmark_id].location
             const cv::Matx31d& cvpt = this->landmarks.at(landmark_id).location;
-            const g2o::Vector3 pt(cvpt(0), cvpt(1), cvpt(2));
+            // For eg: cvpt = np.array([x, y, z], dtype=np.float64)  # your 3×1 point; pt = np.array([cvpt[0], cvpt[1], cvpt[2]], dtype=np.float64)
+            // g2o expects its own Vector3 type, so we copy the three coordinates.
+            const g2o::Vector3 pt(cvpt(0), cvpt(1), cvpt(2));   
+
+            // Create a new graph vertex for this 3D point in space
             g2o::VertexPointXYZ* v_pt = new g2o::VertexPointXYZ();
-            v_pt->setId(landmark_id_start + landmark_id);
-            v_pt->setEstimate(pt);
-            v_pt->setMarginalized(true);
-            v_pt->setFixed(fix_landmarks);
-            non_fixed_landmarks += (fix_landmarks == false);
-            opt.addVertex(v_pt);
-            // Add edges.
+            v_pt->setId(landmark_id_start + landmark_id); // each vertex in g2o must have a unique integer ID—here we offset by landmark_id_start so it doesn’t clash with pose‐vertex IDs.
+            v_pt->setEstimate(pt); // initialize the optimizer's guess for this point to our current map coordinate
+            v_pt->setMarginalized(true); //  tells g2o to marginalize (i.e. handle via Schur complement) these point variables, which is standard practice in BA.
+            v_pt->setFixed(fix_landmarks); // If fix_landmarks==true, we never move these points, otherwise they're free to adjust
+            // 2b) Count how many of these points are actually free'
+            //  If we are not fixing landmarks, we increment a counter so we know we have something to optimize.
+            non_fixed_landmarks += (fix_landmarks == false); // fix_landmarks are ones that needs to be optimized
+            // 2c) Finally add the vertex into the optimizer
+            opt.addVertex(v_pt); // This hands ownership of the pointer to the g2o optimizer. From now on, g2o manages it.
+
+            //********************* Add edges *****************************************
+
+            // TL; DR
+            /* Each iteration here ties one 3D landmark to one 2D keypoint observation. During optimization, g2o “knows”:
+            1. Which 3D point (Vertex 0)
+            2. Which camera pose (Vertex 1)
+            3. Where in the image you saw it (measurement uv)
+            4. How certain you are (information & robust kernel)
+            5. How to project a 3D point through that camera (fx,fy,cx,cy)
+            …and it adjusts all variables to make reprojections match those measurements as closely as possible.
+            */
+
+            // bundle-adjustment setup, adding one g2o “edge” per observation of a landmark in a frame:
+            // cvpt holds the 3D coords (X, Y, Z) of the landmark whereas cvkp is the pixel location of one of ORB keypoints in a particular frame (u, v)
+            // So in each iteration we take a 3D landmark position (cvpt) and its observed 2D keypoint projection (cvkp) and create a g2o edge that says “project this 3D point through that camera and it should land at these pixel coordinates.”
+            // this->observations[landmark_id] is a std::vector of (frame_id, kp_index) pairs; Structured binding ([frame_id, kp_index]) pulls out each pair
             for (const auto& [frame_id, kp_index] : this->observations[landmark_id]) {
+                // If you’re doing local BA (i.e. only frames within a sliding window), skip observations from frames too old.
                 if ((local_window > 0) && (frame_id < local_window_below)) {
                     continue;
                 }
-                const Frame& frame = frames.at(frame_id);
+                const Frame& frame = frames.at(frame_id); // Look up the Frame object by its frame_id.
+                // Get the 2D pixel location (.pt) of the keypoint in that frame.; We cast the stored int kp_index to unsigned int to index
                 const cv::Point2f& cvkp = frame.kps[static_cast<unsigned int>(kp_index)].pt;
+                // Grab a reference to the camera’s intrinsic matrix 
                 const cv::Matx33d& cvk = frame.K;
+                // Create a new “projection” edge: it will measure a 3D point in space (Vertex 0) projected into a camera pose (Vertex 1) and compare to the observed pixel.
                 g2o::EdgeSE3ProjectXYZ* edge = new g2o::EdgeSE3ProjectXYZ();
+                // Vertex 0: the 3D point’s variable ID is landmark_id_start + landmark_id (we offset so IDs don’t clash with frame IDs).
                 edge->setVertex(0, opt.vertex(landmark_id_start + landmark_id));
+                // Vertex 1: the camera pose’s variable ID is exactly frame_id
                 edge->setVertex(1, opt.vertex(frame_id));
-                if ((frame_id > (fix_landmarks == false)) && (landmark_id >= 0)) {
+                // Bookkeeping: count how many of these edges actually connect optimizable variables.
+                if ((landmark_id >= 0)) && (frame_id > (fix_landmarks == false)) {
                     ++non_fixed_edges;
                 }
+                // Tell g2o “my observed pixel is (u, v) = (cvkp.x, cvkp.y)”. That becomes the measurement it will try to fit.
                 edge->setMeasurement(g2o::Vector2(cvkp.x, cvkp.y));
+                // The “information matrix” is the inverse of the measurement covariance. Here we say “all directions are equally certain, unit weight.”
                 edge->setInformation(g2o::Matrix2::Identity());
-                g2o::RobustKernelHuber* robust_kernel = new g2o::RobustKernelHuber();
-                robust_kernel->setDelta(std::sqrt(5.991));
+                // Wrap this edge in a Huber robust kernel to reduce the impact of outliers (points that reprojection-error far exceed expectations).
+                // .py eq: ```robust_kernel = RobustKernelHuber()```
+                g2o::RobustKernelHuber* robust_kernel = new g2o::RobustKernelHuber(); // Hey, create a new Huber robust kernel instance and give me a pointer to it so I can use it later. 
+        
+                // Configure a Huber robust kernel to down-weight outliers:
+                // - 5.991 is the 95%-quantile of the χ² (Chi-Sqyuare) distribution with 2 DOF (for 2D reprojection error).
+                // - sqrt(5.991) ≈ 2.447 pixels: residuals ≤2.447px use squared error (inliers),
+                //  residuals >2.447px use linear error (outliers get down-weighted). 
+                // tells the Huber kernel “up to ±2.447 pixels of residual, keep using the regular squared error; beyond that, switch to a linear penalty so that gross outliers don’t blow up your total cost.”
+                robust_kernel->setDelta(std::sqrt(5.991)); // δ = 2.447 is absolute residual threshold; This choice ensures that genuine inliers (with reprojection errors under about 2.4 px) are optimized as usual, while measurements with larger errors get down-weighted, improving robustness to mismatches.
                 edge->setRobustKernel(robust_kernel);
-                edge->fx = cvk(0,0);
+                // Tell the edge the intrinsics so it can project 3D→2D properly:
+                edge->fx = cvk(0,0); // focal length in pixels fx, fy
                 edge->fy = cvk(1,1);
-                edge->cx = cvk(0,2);
+                edge->cx = cvk(0,2); // prinicpal points offsets cx,cy
                 edge->cy = cvk(1,2);
+                // Finally, register this edge with the optimizer. When we call opt.initializeOptimization() + opt.optimize(), g2o will adjust both the camera poses and the 3D point positions to minimize the sum of squared reprojection errors across all these edges.
                 opt.addEdge(edge);
             }
         }
-        // Check for some invalid optimiser states.
+
+        // Now the g2o optimizer graph is built (vertices + edges)
+
+        // Check for some invalid optimizer states.
+        // If we have no vertices (no camera poses or points) or no edges (no reprojection constraints), there’s nothing to optimize.
         if (opt.vertices().empty() || opt.edges().empty()) {
             std::printf("Optimised: No edges to optimise [%zu %zu]\n", opt.vertices().size(), opt.edges().size());
             return;
         }
+        // non_fixed_poses == 0: Means all camera vertices in our window are marked fixed, so nothing to adjust.
+        // (fix_landmarks == false) && (non_fixed_landmarks == 0): If we intend to optimize landmarks (fix_landmarks == false) but there are zero unfixed landmark vertices, again nothing to do.
+        // non_fixed_edges == 0: No edges actually connect free variables—that also means no optimization can happen.
         if ((non_fixed_poses == 0) || ((fix_landmarks == false) && (non_fixed_landmarks == 0)) || (non_fixed_edges == 0)) {
             std::printf("Optimised: No non fixed poses [%d %d %d]\n", non_fixed_poses, non_fixed_landmarks, non_fixed_edges);
             return;
         }
-        // Run the optimisation.
-        opt.initializeOptimization();
-        opt.computeActiveErrors();
-        const double initialChi2 = opt.activeChi2();
+
+        // If any of these is true, you log the three counters and return early.
+        
+        // Run the optimisation - Bundle Adjustment
+        opt.initializeOptimization(); // Prepares the internal data structures (like ordering, Hessian, etc.).
+        opt.computeActiveErrors(); // Calculates the current total reprojection error across all active edges.
+        const double initialChi2 = opt.activeChi2(); // Save the “chi-squared” error before optimization.
         //opt.setVerbose(true);
-        opt.optimize(rounds);
+        opt.optimize(rounds); // Run Levenberg–Marquardt for the specified number of iterations (rounds).
         // Apply optimised vertices to frames and landmarks.
         for (const auto& [vertex_id, vertex] : opt.vertices()) {
             if (vertex_id < landmark_id_start) {
+                // Adjust camera pose
+                // --- This is a camera pose vertex v1 ---
                 Frame& frame = frames.at(vertex_id);
-                const g2o::VertexSE3Expmap* v_pt = static_cast<const g2o::VertexSE3Expmap*>(vertex);
-                Eigen::Map<Eigen::Matrix3d>(frame.rotation.val) = v_pt->estimate().rotation().matrix().transpose(); // Eigen is column major.
-                Eigen::Map<Eigen::Vector3d>(frame.translation.val) = v_pt->estimate().translation();
+                const g2o::VertexSE3Expmap* se3v = static_cast<const g2o::VertexSE3Expmap*>(vertex);
+                // Map g2o’s Eigen rotation & translation back into our cv::Matx
+                // frame.rotation[:, :] = v_pt.estimate().rotation().matrix().T  # .T is transpose in NumPy ; NumPy arrays are row-major, but in most cases you don't need to worry unless you deal with very low-level memory layouts.12
+                // 3x3 Matrix
+                Eigen::Map<Eigen::Matrix3d>(frame.rotation.val) = se3v->estimate().rotation().matrix().transpose(); // Eigen is column major.
+                // 3x1 vector
+                Eigen::Map<Eigen::Vector3d>(frame.translation.val) = se3v->estimate().translation();
             }
             else {
+                // Adjust geometry 3D point
+                // -- This is a landmark (3D point) vertex v0 ---
+                // Reserved IDs [0 … landmark_id_start-1] for camera poses, and [landmark_id_start … ) for points.
                 Landmark& landmark = this->landmarks.at(vertex_id - landmark_id_start);
                 const g2o::VertexPointXYZ* v_pt = static_cast<const g2o::VertexPointXYZ*>(vertex);
                 Eigen::Map<Eigen::Vector3d>(landmark.location.val) = v_pt->estimate();
@@ -373,35 +453,73 @@ public:
         std::printf("Optimised: %f to %f error [%zu %zu]\n", initialChi2, opt.activeChi2(), opt.vertices().size(), opt.edges().size());
     }
 
+    // Culling is removing unnecessary or irrelevant elements from a dataset to improve efficiency.
+    // In 3D vision or mapping, it often means discarding bad or redundant frames, points, or observations to keep the system fast and accurate.
     void cull() {
+        // how many landmarks before culling
+        // .size() returns how many entries (map points) we currently have; We store it to later report how many we removed.
         const size_t landmarks_before_cull = this->landmarks.size();
-        for (std::unordered_map<int, Landmark>::iterator it = this->landmarks.begin(); it != this->landmarks.end();) {
-            const std::pair<int, Landmark>& landmark = *it;
+        // Iterate over landmarks by iterator, so we can erase safely while looping
+        // .py eq: ```it = iter(self.landmarks.items()) ; for landmark_id, landmark in it ```
+        for (std::unordered_map<int, Landmark>::iterator it = this->landmarks.begin(); 
+            // Access the current landmark’s ID and data
+            it != this->landmarks.end();) {
+            // We omit ++it in the `for` header because we’ll advance (or reset) it manually after possible erasure.
+            const std::pair<int, Landmark>& landmark = *it; // *it dereferences the iterator to a pair<key, value>.
+            // landmark.first is the landmark’s integer ID; landmark.second is the Landmark object.
+            // observations maps each landmark ID → vector of (frame_id, keypoint_index).
+            // .at(id) retrieves that vector (throws an exception if missing).
             const std::vector<std::pair<int, int>>& landmark_observations = this->observations.at(landmark.first);
+            // check filter conditions
+            // not_seen_in_many_frames: if the landmark appears in 4 or fewer frames total, it’s weakly observed.
             bool not_seen_in_many_frames = landmark_observations.size() <= 4;
+            // not_seen_recently: either never observed (empty()), or last seen more than 7 frames ago.
+            // Frame::id_generator is the next new frame’s ID, so subtracting 7 tells “7 frames ago”.
             bool not_seen_recently = landmark_observations.empty() || ((landmark_observations.back().first + 7) < Frame::id_generator);
+            // If it’s both weakly seen AND stale, remove it outright
+            // If a landmark is both poorly tracked and hasn’t been updated recently, we delete it: Remove its entry in observations; 
+            // Erase from landmarks, which returns the next valid iterator → assigned back to it
             if (not_seen_in_many_frames && not_seen_recently) {
                 this->observations.erase(landmark.first);
                 it = this->landmarks.erase(it);
-                continue;
+                continue;  // skip straight to the next iterator position
             }
+            // Compute the landmark’s average reprojection error
             float reprojection_error = 0.0f;
+            // We’ll accumulate error across every observation:
             for (const auto& [frame_id, kp_index] : landmark_observations) {
+                // Each frame_id, kp_index pair tells us which frame and which keypoint saw this landmark; Fetch that Frame from frames map.
                 const Frame& frame = this->frames.at(frame_id);
+                // The measured 2D pixel location
+                // frame.kps[kp_index].pt is a Point2f → actual pixel coordinates where ORB detected the feature.
+                // result of optimization
                 const cv::Matx21d measured = {static_cast<double>(frame.kps[static_cast<unsigned int>(kp_index)].pt.x), static_cast<double>(frame.kps[static_cast<unsigned int>(kp_index)].pt.y)};
+                // Transformation from original set  of 3D points
+                // Project the landmark’s 3D location back into this camera ; world2cam
+                // take the 3D landmark (location) in world coordinates, Rotate & translate it into the camera frame: frame.rotation * X + frame.translation.
+                // Multiply by intrinsic matrix K → yields (u·w, v·w, w).
                 const cv::Matx31d mapped = frame.K * ((frame.rotation * landmark.second.location) + frame.translation);
+                // Divide x,y by w → final reprojected pixel (u, v). 
                 const cv::Matx21d reprojected{mapped(0) / mapped(2), mapped(1) / mapped(2)};
+                // Accumulate Euclidean pixel error; cv::norm(...) computes √((dx)² + (dy)²).
                 reprojection_error += static_cast<float>(cv::norm(measured - reprojected));
             }
+            // Sum these errors, then divide by the number of observations → the mean reprojection error in pixels.
             reprojection_error /= static_cast<float>(landmark_observations.size());
+            // If the average error is too large, remove the landmark
+            // 5.991 is the χ² threshold for a 95% confidence ellipse in 2D (with 2 DOF). If beyond that, it’s an outlier → we erase as before.
+            // If it’s acceptable, we manually ++it to move to the next entry.
             if (reprojection_error > 5.991f) {
                 this->observations.erase(landmark.first);
                 it = this->landmarks.erase(it);
                 continue;
             }
+            // Otherwise, keep it and advance the iterator
             ++it;
         }
+        // Report how many points we removed
         const size_t landmarks_after_cull = this->landmarks.size();
+        // Subtract the “after” count from the “before” count to know how many landmarks got purged.
         std::printf("Culled: %zu points\n", landmarks_before_cull - landmarks_after_cull);
     }
 };

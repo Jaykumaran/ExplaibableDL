@@ -1,5 +1,9 @@
 Reference:
 
+
+More Appropirate to call is Visual Odometry as *Loop Closure isn't yet integrated.
+Currently uses Global BA instead of loop-closure.
+
 https://github.com/gpdaniels/slam/
 
 
