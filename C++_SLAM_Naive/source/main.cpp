@@ -526,59 +526,125 @@ public:
 
 class SLAM {
 public:
-    Map mapp;
+    Map mapp; //  declares a member variable mapp of type Map, which holds all frames, landmarks, and observations.
 
 public:
     void process_frame(const cv::Matx33d& K, const cv::Mat& image_grey) {
-        Frame frame(image_grey, K, cv::Mat::zeros(1, 4, CV_64F));
-        this->mapp.add_frame(frame);
+        // Internally, Frame will detect ORB keypoints, compute descriptors, set frame.id from a static counter, and initialize its pose to identity.
+        Frame frame(image_grey, K, cv::Mat::zeros(1, 4, CV_64F)); // a 1×4 zero vector for distortion coefficients.
+        this->mapp.add_frame(frame); // mapp.add_frame(frame) inserts this new Frame into the map’s frames container keyed by frame.id
+        
         // Nothing to do for the first frame.
-        if (frame.id == 0) {
-            return;
+        if (frame.id == 0) { // frame.id == 0 is true only for the very first image that we ever process.
+            return; // return; exits process_frame early—there’s no “previous frame” to match against yet.            
         }
         // Get the most recent pair of frames.
+        // Frame::id_generator is a static integer that was incremented when you created frame.
+        // So the latest frame’s ID is id_generator-1, and the one before that is id_generator-2.
         Frame& frame_current = mapp.frames.at(Frame::id_generator - 1);
+        // mapp.frames.at(key) looks up the Frame in the unordered_map by its ID—and returns it by reference so you can modify its pose later.
         Frame& frame_previous = mapp.frames.at(Frame::id_generator - 2);
-        // Helper functions for filtering matches.
-        constexpr static const auto ratio_test = [](std::vector<std::vector<cv::DMatch>>& matches) {
+        // Helper Lambda functions for filtering matches.
+        // Before computing matches, we define two small functions (lambdas) to filter out bad matches: 
+        // static → one copy shared by all SLAM instances ; constexpr → can be evaluated at compile time (though here mainly symbolic);  
+        //  takes a reference to a vector of “knn” match lists (matches), each containing up to two DMatch objects.
+
+        // .py eq of std::vector<std::vector<cv::DMatch>>& matches is ```matches: list[list[cv2.DMatch]]```
+        constexpr static const auto ratio_test = [](std::vector<std::vector<cv::DMatch>>& matches) { 
+
+            // Calls std::remove_if to find any entry where
+                                      // 1. there is only one (or zero) neighbor, or
+                                      // 2. the ratio of best‐to‐second‐best match distance exceeds 0.75 (Lowe’s ratio test).
             matches.erase(std::remove_if(matches.begin(), matches.end(), [](const std::vector<cv::DMatch>& options){
                 return ((options.size() <= 1) || ((options[0].distance / options[1].distance) > 0.75f));
-            }), matches.end());
+            }), matches.end()); //So the }), matches.end()); is simply closing out the call to erase( firstIt, lastIt ),
         };
+        
+        // implementing the “symmetry test” to keep only matches that agree in both directions:
+        // matches1: matches from current→previous ; matches2: matches from previous→current, 
+        // symMatches: output container for the mutually consistent matches.
+
+
+        /*```python
+        def symmetry_test(matches1: list[list[cv2.DMatch]], matches2: list[list[cv2.DMatch]], sym_matches: list[list[cv2.DMatch]]):
+            sym_matches.clear()  # wipe out old results
+
+            for match1 in matches1:
+                for match2 in matches2:
+                    if (match1[0].queryIdx == match2[0].trainIdx) and (match2[0].queryIdx == match1[0].trainIdx):
+                        sym_matches.append([
+                            cv2.DMatch(match1[0].queryIdx, match1[0].trainIdx, match1[0].distance)
+                        ])
+                        break```
+        */
         constexpr static const auto symmetry_test = [](const std::vector<std::vector<cv::DMatch>> &matches1, const std::vector<std::vector<cv::DMatch>> &matches2, std::vector<std::vector<cv::DMatch>>& symMatches) {
-            symMatches.clear();
+            symMatches.clear(); // Inside, the first thing we do is symMatches.clear(), wiping out any old results     
+            // Iterate over each entry in matches1.   
+            // Each *matchIterator1 is a std::vector<cv::DMatch> (the result of a knnMatch, usually size 2).     
             for (std::vector<std::vector<cv::DMatch>>::const_iterator matchIterator1 = matches1.begin(); matchIterator1!= matches1.end(); ++matchIterator1) {
+                
                 for (std::vector<std::vector<cv::DMatch>>::const_iterator matchIterator2 = matches2.begin(); matchIterator2!= matches2.end();++matchIterator2) {
+                    // For each candidate in matches1, scan all entries in matches2 and the other way
                     if ((*matchIterator1)[0].queryIdx == (*matchIterator2)[0].trainIdx &&(*matchIterator2)[0].queryIdx == (*matchIterator1)[0].trainIdx) {
+                        // (*matchIterator1)[0].queryIdx is the index of the keypoint in the current frame.
+                        // (*matchIterator1)[0].trainIdx is the index of its best match in the previous frame.
+                        // Conversely, in matches2 we expect to see the same pair reversed: its best match’s queryIdx (in the “previous” frame) should equal the original trainIdx, and
+                        // its trainIdx (in the “current” frame) should equal the original queryIdx. If both hold, the match is mutually consistent.
+                        // We push a new one‐element vector of DMatch into symMatches, copying over the queryIdx, trainIdx, and distance.
                         symMatches.push_back({cv::DMatch((*matchIterator1)[0].queryIdx,(*matchIterator1)[0].trainIdx,(*matchIterator1)[0].distance)});
                         break;
                     }
                 }
             }
         };
+
+
+
+
         // Compute matches and filter.
+        // Create matcher; cv::Ptr<> is OpenCV’s reference-counted smart pointer; BFMatcher does brute-force matching of binary descriptors (ORB uses binary patterns).
+        // cv::NORM_HAMMING tells it to compare descriptors by Hamming distance (count of differing bits).
         static cv::Ptr<cv::BFMatcher> matcher = cv::BFMatcher::create(cv::NORM_HAMMING);
+        // Prepare containers for k-NN matches
+        // Each “outer” vector will hold, for each descriptor in one frame, a small list of its two nearest neighbors in the other frame (the “cp” vs “pc” means current→previous and previous→current).
         std::vector<std::vector<cv::DMatch>> matches_cp;
         std::vector<std::vector<cv::DMatch>> matches_pc;
-        matcher->knnMatch(frame_current.des, frame_previous.des, matches_cp, 2);
-        matcher->knnMatch(frame_previous.des, frame_current.des, matches_pc, 2);
+        // Run k-NN matching in both directions
+        matcher->knnMatch(frame_current.des, frame_previous.des, matches_cp, 2); // best two matches k = 2
+        matcher->knnMatch(frame_previous.des, frame_current.des, matches_pc, 2); // // Given a vector of two nn matches per descriptor:
+        // Lowe's nearest neighbor filtering
+        // ratio_test lambda we defined above, removes any match list whose best match is not sufficiently better than the second-best (typically d1/d2 > 0.75). This prunes ambiguous feature correspondences.
+        // Lowe showed that this dramatically cuts down on false correspondences without losing many true ones.
         ratio_test(matches_cp);
         ratio_test(matches_pc);
         std::vector<std::vector<cv::DMatch>> matches;
-        symmetry_test(matches_cp, matches_pc, matches);
+        //  symmetry_test lambda compares the two lists and keeps only those matches where
+        //    - A’s best match in B is B’s best match in A, and
+        //    - The index mapping is consistent.
+
+        symmetry_test(matches_cp, matches_pc, matches); // The result is a smaller set of high-confidence matches in matches.
+
+
         // Create final arrays of good matches.
+        // Allocate final arrays for indices & 2D points
+        // match_index_*: which keypoint index in each frame
         std::vector<int> match_index_current;
         std::vector<int> match_index_previous;
+        // match_point_*: the actual pixel coordinates (as 2×1 double matrices)
         std::vector<cv::Matx21d> match_point_current;
         std::vector<cv::Matx21d> match_point_previous;
         for (const std::vector<cv::DMatch>& match : matches) {
-            const cv::DMatch& m = match[0];
+            const cv::DMatch& m = match[0]; // Extract the best match from each pair
+            // Store the keypoint indices and pixel locations
             match_index_current.push_back(m.queryIdx);
             match_point_current.push_back({static_cast<double>(frame_current.kps[static_cast<unsigned int>(m.queryIdx)].pt.x), static_cast<double>(frame_current.kps[static_cast<unsigned int>(m.queryIdx)].pt.y)});
             match_index_previous.push_back(m.trainIdx);
             match_point_previous.push_back({static_cast<double>(frame_previous.kps[static_cast<unsigned int>(m.trainIdx)].pt.x), static_cast<double>(frame_previous.kps[static_cast<unsigned int>(m.trainIdx)].pt.y)});
         }
         std::printf("Matched: %zu features to previous frame\n", matches.size());
+
+
+
         // Pose estimation of new frame.
         if (frame_current.id < 2) {
             cv::Mat E;
