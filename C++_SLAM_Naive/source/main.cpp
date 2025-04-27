@@ -11,6 +11,7 @@ glfw.h inclues header for GLFW, lightweight cross platform library for creating,
 Allows to call functions like glfwInit(), glfwCreateWindow(), and glfwPollEvents().
 */
 
+
 // OpenCV
 #include <opencv2/opencv.hpp>
 
@@ -25,6 +26,7 @@ Allows to call functions like glfwInit(), glfwCreateWindow(), and glfwPollEvents
 #include <g2o/core/robust_kernel_impl.h> 
 // Supplies a LinearSolverEigen implementation that uses Eigen’s sparse linear algebra routines under the hood. The block solver needs a linear solver to invert or factor the Hessian‐approximation matrix at each LM step.
 #include <g2o/solvers/eigen/linear_solver_eigen.h> 
+
 /*
 Pulls in the ready-made types for “six‐degree‐of‐freedom with exponential map”:
 - VertexSE3Expmap for camera poses (rotation + translation).
@@ -99,93 +101,192 @@ public:
     }
 };
 
+// Instances of this class represent one 3D point in our map
 class Landmark {
-public:
-    static inline int id_generator = 0;
-    int id;
-    cv::Matx31d location;
-    cv::Matx31d colour;
-public:
-    Landmark() = default;
-    Landmark(const cv::Matx31d& input_location, const cv::Matx31d& input_colour) {
-        this->id = Landmark::id_generator++;
-        this->location = input_location;
-        this->colour = input_colour;
-    }
+    // Everything that follows the next access specifier is public
+    public:
+        // Shared by all Landmark objects
+        static inline int id_generator = 0;
+        int id;
+        cv::Matx31d location;
+        cv::Matx31d colour;
+    public:
+        Landmark() = default;
+        Landmark(const cv::Matx31d& input_location, const cv::Matx31d& input_colour) {
+            // Class-wide (across all instances) postfix incremement 
+            // Postfix : returns old value of x and then increments
+            // starts with first id as 0, but if we need to start with 1, then ++Landmark::id_generator should help
+            this->id = Landmark::id_generator++; // specifying the Landmark class non-static id that we have declared earlier
+            this->location = input_location;
+            this->colour = input_colour;
+        }
 };
+
 
 class Map {
 public:
+    // an hash-map from each Frame's unique id to the Frame object
     std::unordered_map<int, Frame> frames;
     std::unordered_map<int, Landmark> landmarks;
-    // TODO: Ideally this should be a multi index map.
+    // **Key value mapping**, Maps each 3D point's id tp its landmark
+    // observations: for each landmark ID, stores a vector pairs (this landmark was seen in that frame at that keypoint)
     std::unordered_map<int, std::vector<std::pair<int, int>>> observations; // key is landmark_id, pair are frame_id and kp_index
+    //             landmark ID  └─ list of (frame ID, keypoint index)
+
 public:
+    // Takes in a frame by reference then copies it into the frames map under its own id key
     void add_frame(const Frame& frame) {
         frames[frame.id] = frame;
     }
-    
+    // Takes in a landmark by reference then copies it into the landmark map under its own id key
     void add_landmark(const Landmark& landmark) {
         this->landmarks[landmark.id] = landmark;
     }
-    
+    // insert 3D point 
     void add_observation(const Frame& frame, const Landmark& landmark, int kp_index) {
         this->observations[landmark.id].push_back({ frame.id, kp_index });
     }
-
+    // Triangulation
+    // Can call Map::triangulate(...) without an instance of Map
+    // Returns a 4x1 homogeneous coordinate (X, Y, Z, W) stored in cv::Matx41d
     static cv::Matx41d triangulate(const Frame& lhs_frame, const Frame& rhs_frame, const cv::Point2d& lhs_point, const cv::Point2d& rhs_point) {
+        // A 3x4 matrix [R | t] for the first camera: 
+        // Matx34d stores exactly 3 rows x 4 columns of type double
         cv::Matx34d cam1 = {
             lhs_frame.rotation(0,0), lhs_frame.rotation(0,1), lhs_frame.rotation(0,2), lhs_frame.translation(0),
             lhs_frame.rotation(1,0), lhs_frame.rotation(1,1), lhs_frame.rotation(1,2), lhs_frame.translation(1),
             lhs_frame.rotation(2,0), lhs_frame.rotation(2,1), lhs_frame.rotation(2,2), lhs_frame.translation(2),
         };
+        // Build second camera's projection the same way 3x4
         cv::Matx34d cam2 = {
             rhs_frame.rotation(0,0), rhs_frame.rotation(0,1), rhs_frame.rotation(0,2), rhs_frame.translation(0),
             rhs_frame.rotation(1,0), rhs_frame.rotation(1,1), rhs_frame.rotation(1,2), rhs_frame.translation(1),
             rhs_frame.rotation(2,0), rhs_frame.rotation(2,1), rhs_frame.rotation(2,2), rhs_frame.translation(2),
         };
+
+        // Normalized points lhs (cam1)
         std::vector<cv::Point2d> lhs_point_normalised;
-        cv::undistortPoints(std::vector<cv::Point2d>{lhs_point}, lhs_point_normalised, lhs_frame.K, lhs_frame.dist);
+        // Undistort 
+        // Takes distorted image coordinates and undistorted coordinates (ideal pinhole camera model)
+        // Uses K and distortion coeffs to produce normalized, undistorted coords
+        cv::undistortPoints(src = std::vector<cv::Point2d>{lhs_point}, lhs_point_normalised, lhs_frame.K, lhs_frame.dist);
+        // Normalized points rhs (cam2)
         std::vector<cv::Point2d> rhs_point_normalised;
-        cv::undistortPoints(std::vector<cv::Point2d>{rhs_point}, rhs_point_normalised, rhs_frame.K, rhs_frame.dist);
-        cv::Mat potential_landmark(4, 1, CV_64F);
-        cv::triangulatePoints(cam1, cam2, lhs_point_normalised, rhs_point_normalised, potential_landmark);
+        cv::undistortPoints(src = std::vector<cv::Point2d>{rhs_point},
+                            dst = rhs_point_normalised, 
+                            cameraMatrix = rhs_frame.K,
+                            distCoeffs = rhs_frame.dist,
+                            R = cv::noArray(),
+                            T = cv::noArray());
+
+
+        cv::Mat potential_landmark(rows = 4,cols= 1, type = CV_64F);
+
+        // triangulatePoints: implements linear triangulation (e.g. SVD or DLT), solving:
+        //   [ p1 × (P1 X)
+        //     p2 × (P2 X) ] = 0,
+        // where P1 = [R1 | t1] and P2 = [R2 | t2], and returns X in homogeneous form.
+        cv::triangulatePoints(
+                        projMatr1 = cam1, 
+                        projMatr2 = cam2, 
+                        projPoints1 = lhs_point_normalised, 
+                        projPoints2 = rhs_point_normalised,
+                        points4D = potential_landmark);
+
+        /*
+        OpenCV’s triangulatePoints uses the Direct Linear Transform (DLT) 
+        formulation and then solves the resulting homogeneous linear system via 
+        Singular Value Decomposition (SVD). In other words, there’s a single fixed algorithm 
+        under the hood: you build the DLT matrix A so that A·X = 0 and then compute the null‐space 
+        of A using SVD to recover X.
+        */
+
+        // Can be converted to Euclidean (X/W, Y/W, Z/W)
+
+        /* equivalent 
+        np.array([
+        potential_landmark[0, 0],
+        potential_landmark[1, 0],
+        potential_landmark[2, 0],
+        potential_landmark[3, 0]
+        ], dtype=np.float64)
+        */
+
         return cv::Matx41d{
-            potential_landmark.at<double>(0), 
-            potential_landmark.at<double>(1), 
+            // .at<double>(0) directly accesses the stored double element (no runtime type conversion)
+            potential_landmark.at<double>(0),   // accessing element at a specified index pos
             potential_landmark.at<double>(2),
             potential_landmark.at<double>(3)
         };
     }
-    
-    void optimise(int local_window , bool fix_landmarks, int rounds) {
+    // <opencv2/video/tracking.hpp>
+
+    void optimise(int local_window, // controls how many recent frames to include in this BA
+                 bool fix_landmarks, // bool: if true keeps all 3D points fixed(and only optimizes camera poses)
+                 int rounds         // number of Levenberg-Marquardt iterations to run
+                ) {
+        // Creates the linear solver that g2o will use under the hood (Eigen's Sparse Cholesky)
+        // unique_pt<...> manages the memory automatically
+        // Wraps the linear solver into a blocksolver that handles "6DoF pose+3D point" blocks
+        // std::move(...) transfer ownership into the block solver constructor.
+
+        /*
+         - Declares solver_ptr as a smart pointer that solely owns a BlockSolver instance, when solver goes out of scope, it will automatically delete its pointees.  By using unique_ptr everywhere, there’s no confusion about who must call delete
+         - std::make_unique allocates and constructs the BlockSolver on the heap
+         */
+
+        // Block Solver needs linear-solver object to do its inner matrix factorizations
+        // BlockSolver_6_3::PoseMatrixType is a typedef for an Eigen 6×6 matrix
+        // It represents the Hessian/block size for camera‐pose variables (which have 6 DoF)
+        // We pass it to LinearSolverEigen<> so g2o knows to build and solve linear systems of size 6
+        // Each camera pose is treated as a 6-Dimensional variable
+        // The Pose Transformation has 6 DOF ( 3 rotation and 3 translation)
         std::unique_ptr<g2o::BlockSolver_6_3::LinearSolverType> linear_solver = std::make_unique<g2o::LinearSolverEigen<g2o::BlockSolver_6_3::PoseMatrixType>>();
         std::unique_ptr<g2o::BlockSolver_6_3> solver_ptr = std::make_unique<g2o::BlockSolver_6_3>(std::move(linear_solver));
+        // Chooses the Levenberg–Marquardt strategy (damped Gauss–Newton) to optimize the whole graph.
         g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(std::move(solver_ptr));
-        solver->setWriteDebug(false);
+        solver->setWriteDebug(false); // Disables g2o’s verbose debug output.
+        // Creates the optimizer object opt and tells it “use the solver we just built”.
         g2o::SparseOptimizer opt;
         opt.setAlgorithm(solver);
+        // PoseMatrix as linear solver -> ownership to BlockSolver -> use solver
+
         // Add frames.
-        int non_fixed_poses = 0;
-        int landmark_id_start = 0;
-        const int local_window_below = Frame::id_generator - 1 - local_window;
+        // 1) Counters and window limits
+        int non_fixed_poses = 0; //  will count how many poses you leave free to be optimized.
+        int landmark_id_start = 0; // used later to assign unique IDs to 3D‐point vertices
+        // computes the lowest frame index you still want to include when doing a local bundle adjustment of size local_window.
+        const int local_window_below = Frame::id_generator - 1 - local_window; 
+        // shifts that boundary by one (or two if you’re also fixing landmarks) to decide which older poses to lock (i.e. not optimize) so the window slides correctly.
         const int local_window_fixed_below = local_window_below + 1 + (fix_landmarks == false);
+        //  iterate over all stored frames (frame_id is the key, frame the data).
         for (const auto& [frame_id, frame] : this->frames) {
+            //  (i.e. doing local BA) and this frame’s id is older than the window bottom, continue and skip adding it altogether.
+            // Filters frames to include only those in your local BA window.
             if ((local_window > 0) && (frame_id < local_window_below)) {
                 continue;
             }
+            // 2) Convert OpenCV pose --> g2o SE3Quat
+            // frame.rotation is a CV Matx (row-major), but Eigen wants column-major, so you take its transpose (.t()) and then map its raw .val array into an Eigen::Matrix3d.
             const g2o::Matrix3 rotation = Eigen::Map<const Eigen::Matrix3d>(frame.rotation.t().val); // Eigen is column major.
+            // 
             const g2o::Vector3 translation = Eigen::Map<const Eigen::Vector3d>(frame.translation.val);
-            g2o::SE3Quat se3(rotation, translation);
-            g2o::VertexSE3Expmap* v_se3 = new g2o::VertexSE3Expmap();
+            // pack both into a g2o::SE3Quat, the standard g2o representation of a 6-DOF pose.
+            g2o::SE3Quat se3(rotation, translation); // quaternion
+            // Create and configure the vertex; Converts each selected frame’s (R, t) into a g2o pose vertex.
+            g2o::VertexSE3Expmap* v_se3 = new g2o::VertexSE3Expmap(); //allocates raw memory; Allocate a new g2o vertex (VertexSE3Expmap).
+            // Set its initial guess (setEstimate) to the pose that we just mapped.
             v_se3->setEstimate(se3);
+            // Give it a unique integer ID (we reuse frame_id here, so pose IDs don’t conflict with landmark IDs).
             v_se3->setId(frame_id);
+            // Adds filtered and fixed poses to the optimizer and tracks a safe ID offset for landmarks.
             if ((frame_id <= (fix_landmarks == false)) || ((local_window > 0) && (frame_id < local_window_fixed_below))) {
                 v_se3->setFixed(true);
             }
             else {
-                ++non_fixed_poses;
+                ++non_fixed_poses; // increment fo non fixed poses
             }
+            // 4) registers the pose vertex with the optimizer
             opt.addVertex(v_se3);
             if (frame_id > landmark_id_start) {
                 landmark_id_start = frame_id + 1;
