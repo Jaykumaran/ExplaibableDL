@@ -172,12 +172,12 @@ public:
         cv::undistortPoints(src = std::vector<cv::Point2d>{lhs_point}, lhs_point_normalised, lhs_frame.K, lhs_frame.dist);
         // Normalized points rhs (cam2)
         std::vector<cv::Point2d> rhs_point_normalised;
-        cv::undistortPoints(src = std::vector<cv::Point2d>{rhs_point},
-                            dst = rhs_point_normalised, 
-                            cameraMatrix = rhs_frame.K,
-                            distCoeffs = rhs_frame.dist,
-                            R = cv::noArray(),
-                            T = cv::noArray());
+        cv::undistortPoints(std::vector<cv::Point2d>{rhs_point}, //crc
+                            rhs_point_normalised,  // dst
+                            rhs_frame.K, // cameraMatrix
+                            rhs_frame.dist, // distCoeffs
+                            cv::noArray(), // R
+                            cv::noArray()); // T
 
 
         cv::Mat potential_landmark(rows = 4,cols= 1, type = CV_64F);
@@ -187,11 +187,11 @@ public:
         //     p2 × (P2 X) ] = 0,
         // where P1 = [R1 | t1] and P2 = [R2 | t2], and returns X in homogeneous form.
         cv::triangulatePoints(
-                        projMatr1 = cam1, 
-                        projMatr2 = cam2, 
-                        projPoints1 = lhs_point_normalised, 
-                        projPoints2 = rhs_point_normalised,
-                        points4D = potential_landmark);
+                        cam1,  // rojMatr1 
+                        cam2,  // projMatr2
+                        lhs_point_normalised, //  projPoints1 
+                        rhs_point_normalised, // projPoints2
+                        potential_landmark); // points4D
 
         /*
         OpenCV’s triangulatePoints uses the Direct Linear Transform (DLT) 
