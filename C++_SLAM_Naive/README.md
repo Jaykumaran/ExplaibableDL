@@ -7,6 +7,21 @@ https://github.com/gpdaniels/slam/
 
 
 
+
+**Run Without Docker**
+```sudo apt update
+sudo apt install build-essential cmake git libeigen3-dev libopencv-dev libglfw3-dev libgl1-mesa-dev libglu1-mesa-dev
+```
+
+```rm -rf build # Clean previous docker build artifacts if any
+mkdir build
+cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc) # Or cmake --build . --config Release
+```
+
+**With Docker** 
+**Run in an isolated Environment by interfacing the host display and docker env**
 ```
 bash setup.sh 
 > mkdir build
