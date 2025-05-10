@@ -1,0 +1,152 @@
+[ INPUT: New Video Frame ]
+    |
+    V
+--------------------------------------------------------------------------------
+**A. FRONTEND: Perception & Initial Motion**
+--------------------------------------------------------------------------------
+    |
+    V
+1.  **Image Acquisition & Preprocessing**
+    |   * Read frame from video.
+    |   * Convert to Grayscale.
+    |
+    V
+2.  **Feature Extraction (Current Frame)**
+    |   * `Frame` object created.
+    |   * Detect Shi-Tomasi corners (`cv::goodFeaturesToTrack`).
+    |   * Convert corners to `cv::KeyPoint` objects.
+    |   * Compute ORB descriptors (`cv::ORB::compute()`).
+    |   * Store `Frame` in `Map.frames`.
+    |
+    V
+3.  **Conditional: First Frame?**
+    |   |
+    |   +-- YES:
+    |   |   |
+    |   |   V
+    |   |   [ Store Frame & Features. RETURN (End processing for this frame) ]
+    |   |
+    |   +-- NO (Frame ID > 0):
+    |       |
+    |       V
+    |       4.  **Feature Matching (Current Frame vs. Previous Frame)**
+    |           |   * Retrieve `frame_current` and `frame_previous`.
+    |           |   * `cv::BFMatcher::knnMatch` (k=2, NORM_HAMMING) in both directions.
+    |           |   * Filter Matches:
+    |           |       |   * Lowe's Ratio Test.
+    |           |       |   * Symmetry Test.
+    |           |   * Store reliable 2D-2D point correspondences.
+    |           |
+    |           V
+    |       5.  **Initial Pose Estimation (for `frame_current`)**
+    |           |
+    |           +-- IF `frame_current.id == 1` (Second frame):
+    |           |   |   * `cv::recoverPose` using 2D-2D matches & intrinsics.
+    |           |   |       -> Relative R, t (between frame 0 and 1).
+    |           |   |   * Compute `frame_current` world pose from `frame_previous` (origin) and relative R, t.
+    |           |
+    |           +-- IF `frame_current.id >= 2`:
+    |               |   * `frame_current.pose = frame_previous.pose` (Constant Pose Initialization).
+    |
+    V
+--------------------------------------------------------------------------------
+**B. MID-END: Tracking, Data Association & Localized Optimizations**
+--------------------------------------------------------------------------------
+    |
+    V
+6.  **Data Association with Existing Map Landmarks**
+    |   * Identify which `keypoints` in `frame_previous` (from current matches) correspond to existing `Landmarks` in `Map.landmarks`.
+    |   * For each such correspondence, add a new `Observation` for `frame_current` linking it to the existing `Landmark`.
+    |
+    V
+7.  **Optimization: Pose-Only BA (1)**
+    |   * `Map.optimise(local_window=1, fix_landmarks=true, rounds=50)`
+    |       |   * g2o graph: `frame_current` pose vertex (optimizable), observed `Landmark` vertices (fixed).
+    |       |   * Refines `frame_current.pose`.
+    |
+    V
+8.  **Map Maintenance: Culling (1)**
+    |   * `Map.cull()`: Remove landmarks based on:
+    |       |   * Low observation count & staleness.
+    |       |   * High average reprojection error.
+    |
+    V
+9.  **Data Association: Search by Projection**
+    |   * For each `Landmark` in `Map.landmarks`:
+    |       |   * Project `Landmark.location` into `frame_current` using its current pose.
+    |       |   * If projection is valid & landmark not already observed in `frame_current`:
+    |       |       |   * Search for nearby `KeyPoints` in `frame_current` (from unmatched pool).
+    |       |       |   * If (Proximity < threshold) AND (Descriptor similarity < threshold):
+    |       |       |       |   * Add new `Observation` for `frame_current` linking it to this `Landmark`.
+    |       |       |       |   * Mark the `KeyPoint` as associated.
+    |
+    V
+10. **Optimization: Pose-Only BA (2)**
+    |   * `Map.optimise(local_window=1, fix_landmarks=true, rounds=50)`
+    |       |   * Similar to BA (1), incorporates new observations from Search by Projection.
+    |
+    V
+11. **Map Maintenance: Culling (2)**
+    |   * `Map.cull()`.
+    |
+    V
+--------------------------------------------------------------------------------
+**C. MID-END/BACKEND: New Landmark Triangulation & Further Optimizations**
+--------------------------------------------------------------------------------
+    |
+    V
+12. **Triangulate New Landmarks**
+    |   * For 2D-2D matches (from step 4) *not* associated with existing landmarks:
+    |       |   * `Map::triangulate(frame_current, frame_previous, matched_kp_curr, matched_kp_prev)`
+    |       |       |   * Construct 3x4 projection matrices P_curr, P_prev.
+    |       |       |   * Undistort 2D points.
+    |       |       |   * `cv::triangulatePoints` -> 3D point (homogeneous).
+    |       |   * **Validation of new 3D point:**
+    |       |       |   * Homogeneous W component significant?
+    |       |       |   * Point in front of `frame_previous`?
+    |       |       |   * Point in front of `frame_current`?
+    |       |       |   * Reprojection error in `frame_previous` < threshold?
+    |       |       |   * Reprojection error in `frame_current` < threshold?
+    |       |   * IF all checks pass:
+    |       |       |   * Create new `Landmark` object.
+    |       |       |   * Add `Landmark` to `Map.landmarks`.
+    |       |       |   * Add `Observations` for `frame_previous` and `frame_current` linking to new `Landmark`.
+    |
+    V
+13. **Optimization: Pose-Only BA (3)**
+    |   * `Map.optimise(local_window=1, fix_landmarks=true, rounds=50)`
+    |       |   * Refines `frame_current.pose` after new landmarks have been added and observed by it.
+    |
+    V
+14. **Map Maintenance: Culling (3)**
+    |   * `Map.cull()`.
+    |
+    V
+15. **Optimization: Local Window BA (Backend-like)**
+    |   * `Map.optimise(local_window=40, fix_landmarks=false, rounds=50)`
+    |       |   * g2o graph: Poses of last `N` (e.g., 40) frames (optimizable, older ones fixed).
+    |       |   *              Landmarks observed by these `N` frames (optimizable).
+    |       |   * Simultaneously refines recent poses and their observed landmark positions.
+    |
+    V
+16. **Map Maintenance: Culling (4 - Final for this frame)**
+    |   * `Map.cull()`.
+    |
+    V
+--------------------------------------------------------------------------------
+**D. VISUALIZATION**
+--------------------------------------------------------------------------------
+    |
+    V
+17. **Render Current State**
+    |   * `Display.render(Map)`:
+    |       |   * Draw current frame's image + keypoints.
+    |       |   * Draw all camera frustums (poses from `Map.frames`).
+    |       |   * Draw camera trajectory.
+    |       |   * Draw 3D landmark points (`Map.landmarks`).
+    |
+    V
+[ OUTPUT: Updated Map, Current Pose, Visualization ]
+    |
+    V
+[ LOOP to process next frame (Back to A.1) ]
