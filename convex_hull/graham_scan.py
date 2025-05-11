@@ -37,7 +37,7 @@ def graham_scan(points):
     for i in range(len(points)):
         # we need atleast three point stop to proceed with checking for candidate point
         while len(hull) >= 2 and orientation(hull[-2], hull[-1], points[i]) ! = 1: # before_last, last point, current_point
-              hull.pop() # if clockwise or collinear remove that and go back to the stable last point
+              hull.pop() # if clockwise or collinear (!=1) remove that and go back to the stable last point
         hull.append(points[i])
     return hull
       
