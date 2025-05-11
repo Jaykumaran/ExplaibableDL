@@ -32,7 +32,7 @@ def polar_angle(p1, p2):
 
 def graham_scan(points):
     p0 = min(points, key = lambda p: (p[1], p[0])) # min interms of first y and x as well
-    points.sort(key = lambda p: (polar_angle(p0, p), dist(p0, p)))
+    points.sort(key = lambda p: (polar_angle(p0, p), eucledian_dist(p0, p)))
     hull = []
     for i in range(len(points)):
         # we need atleast three point stop to proceed with checking for candidate point
