@@ -1,4 +1,6 @@
 # Code provided by Gemini 2.5 Pro
+# I dont own any credit for the code,, Just added here for future reference and visual interpretation about the concept better
+
 
 import math
 import matplotlib.pyplot as plt
