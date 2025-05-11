@@ -11,7 +11,7 @@ def orientation(p1, p2, p3):
        return 0
 
 
-def dist(p1, p2):
+def eucledian_dist(p1, p2):
     x1, y2, x2, y2 = *p1, *p2 
     return math.sqrt((y2-y1)**2 + (x2-x1)**2)
 
@@ -27,7 +27,7 @@ def gift_wrapping(points):
             orient = orientation(on_hull, next_point, point)
             if next_point == on_hull or  # check if next_point is there in the hull as we appended in prev cycle
                orient==1 # counter clockwise
-               or (orient == 0 and dist(on_hull, point) > (dist(on_hull, next_point): # collinear
+               or (orient == 0 and eucledian_dist(on_hull, point) > (eucledian_dist(on_hull, next_point): # collinear
                next_point = point
             on_hull = next_point
             if on_hull == hull[0] # check whether it has reached the start point again
