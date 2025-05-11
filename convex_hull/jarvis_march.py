@@ -43,7 +43,7 @@ def gift_wrapping(points):
 
     return hull
 
-# Example usage:
+
 points = [(0, 0), (1, 1), (2, 0), (1, -1), (0, 2), (2, 2)]
 hull = gift_wrapping(points)
 print("Convex Hull:", hull)
