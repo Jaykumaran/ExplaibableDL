@@ -1,6 +1,6 @@
 import math
 
-# Better than Jarvis in terms of complexity
+# Better than Jarvis in terms of complexity  O(n log n)
 
 def orientation(p1, p2, p3):
     # slope logic (m1 - m2) is +ve or -ve or 0
