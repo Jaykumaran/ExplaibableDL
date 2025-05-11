@@ -40,3 +40,4 @@ def graham_scan(points):
         hull.append(points[i])
     return hull
       
+Ref: https://youtu.be/SBdWdT_5isI?feature=shared
