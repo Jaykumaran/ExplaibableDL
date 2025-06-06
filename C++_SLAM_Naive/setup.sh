@@ -10,4 +10,4 @@ docker run \
     --device=/dev/video0:/dev/video0 \
     --interactive \
     --tty \
-    $(docker build -q .)
+    monocular_slam
