@@ -106,12 +106,21 @@ docker: Error response from daemon: error gathering device information while add
 
 Few debug tests:
 1. Check for your graphics devices (GPU):
-`ls -l /dev/dri`
+
+> `ls -l /dev/dri`
+
 Output will look something like this, proving it exists:
-crw-rw----+ 1 root render 226, 128 Jun 6 15:09 renderD128
-crw-rw----+ 1 root render 226, 129 Jun 6 15:09 renderD129
+
+
+>crw-rw----+ 1 root render 226, 128 Jun 6 15:09 renderD128
+
+>crw-rw----+ 1 root render 226, 129 Jun 6 15:09 renderD129
 
 2. Check for your webcams:
-` ls -l /dev/video* `
+
+> ` ls -l /dev/video* `
+
+```
 crw-rw----+ 1 root video 81, 0 Jun 6 15:09 /dev/video0
 crw-rw----+ 1 root video 81, 1 Jun 6 15:09 /dev/video1
+```
